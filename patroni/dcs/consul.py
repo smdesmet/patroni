@@ -493,6 +493,7 @@ class Consul(AbstractDCS):
     def register_service(self, service_name: str, **kwargs: Any) -> bool:
         logger.info('Register service %s, params %s', service_name, kwargs)
         return self._client.agent.service.register(service_name, **kwargs)
+        
 
     @catch_consul_errors
     def deregister_service(self, service_id: str) -> bool:
@@ -544,6 +545,26 @@ class Consul(AbstractDCS):
 
         logger.warning('Could not register service: unknown role type %s', role)
 
+    def _update_service_tags(self, data: Dict[str,Any]) -> Optional[bool]:
+        role = data['role'].replace('_', '-')
+        tags = self._service_tags[:]
+        if role == 'master':
+            tags.append('primary')
+        elif role == 'primary':
+            tags.append('master')
+        existing = self._client.agent.services().get(self._name)
+        logger.info("Checking for updated service tags")
+
+        if set(tags) != set(existing['Tags']):
+            services = self._client.catalog.service(self._scope)[1]
+            for service in services:
+                serviceId = service.get('ServiceID')
+                if serviceId is not None and serviceId == self._name:
+                    node = service['Node']
+                    address = service['Address']
+                    logger.info("Updating service tags for node %s, address %s, service: %s, serviceId %s",node,address,self._scope,serviceId)
+                    self._client.catalog.register(node,address,service={'Service':self._scope,'ID': serviceId,"Tags":tags})
+
     @force_if_last_failed
     def update_service(self, old_data: Dict[str, Any], new_data: Dict[str, Any], force: bool = False) -> Optional[bool]:
         update = False
@@ -554,13 +575,15 @@ class Consul(AbstractDCS):
                 return
             if old_data.get(key) != new_data[key]:
                 update = True
-
+        
         if (
             force or update or self._register_service != self._previous_loop_register_service
             or self._service_tags != self._previous_loop_service_tags
             or self._client.token != self._previous_loop_token
         ):
             return self._update_service(new_data)
+        if (self._service_tags != self._previous_loop_service_tags):
+            return _update_service_tags(new_data)
 
     def _do_attempt_to_acquire_leader(self, retry: Retry) -> bool:
         try:
